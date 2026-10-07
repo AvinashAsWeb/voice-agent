@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voice Agent</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --paper: #EEF1EC; --ink: #1E2B2F; --muted: #5E6B6E;
+    --teal: #0F7B6C; --teal-soft: #CFE6E1; --live: #D9480F; --line: #D5DBD4;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; background: var(--paper); color: var(--ink);
+    font-family: 'Manrope', system-ui, sans-serif; display: flex; justify-content: center;
+  }
+  main { width: 100%; max-width: 560px; padding: 40px 20px; display: flex; flex-direction: column; gap: 24px; }
+  h1 { font-size: 28px; font-weight: 800; margin: 0; letter-spacing: -0.02em; }
+  p.lead { margin: 6px 0 0; color: var(--muted); line-height: 1.5; }
+  label { font-weight: 600; font-size: 14px; display: block; margin-bottom: 6px; }
+  select {
+    width: 100%; padding: 12px; font: inherit; border: 1px solid var(--line);
+    border-radius: 10px; background: #fff; color: var(--ink);
+  }
+  .stage { display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 18px 0; }
+  .mic-wrap { position: relative; width: 168px; height: 168px; display: grid; place-items: center; }
+  .ring {
+    position: absolute; inset: 0; border-radius: 50%; background: var(--teal-soft);
+    transform: scale(0.72); transition: transform 80ms linear;
+  }
+  .live .ring { background: #F6D5C6; }
+  #micBtn {
+    position: relative; width: 120px; height: 120px; border-radius: 50%; border: none;
+    background: var(--teal); color: #fff; font: 800 16px 'Manrope', sans-serif; cursor: pointer;
+  }
+  .live #micBtn { background: var(--live); }
+  #micBtn:focus-visible { outline: 3px solid var(--ink); outline-offset: 4px; }
+  #status { font-weight: 600; color: var(--muted); min-height: 1.4em; text-align: center; }
+  .tip { font-size: 13px; color: var(--muted); text-align: center; }
+  #log {
+    background: #fff; border: 1px solid var(--line); border-radius: 14px; padding: 16px;
+    height: 300px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px;
+  }
+  .msg { max-width: 85%; padding: 10px 14px; border-radius: 12px; line-height: 1.45; font-size: 15px; }
+  .user { align-self: flex-end; background: var(--ink); color: #fff; border-bottom-right-radius: 4px; }
+  .agent { align-self: flex-start; background: var(--teal-soft); border-bottom-left-radius: 4px; }
+  .empty { color: var(--muted); margin: auto; text-align: center; }
+  @media (prefers-reduced-motion: reduce) { .ring { transition: none; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Talk to the agent</h1>
+    <p class="lead">Pick a persona, press Start and speak. You can interrupt the agent at any time.</p>
+  </header>
+
+  <div>
+    <label for="persona">Persona</label>
+    <select id="persona"></select>
+  </div>
+
+  <div class="stage" id="stage">
+    <div class="mic-wrap">
+      <div class="ring" id="ring"></div>
+      <button id="micBtn" aria-label="Start conversation">Start</button>
+    </div>
+    <div id="status">Ready</div>
+    <div class="tip">Use headphones so the agent does not hear itself.</div>
+  </div>
+
+  <div id="log" aria-live="polite"><div class="empty" id="empty">The conversation will appear here.</div></div>
+</main>
+
+<script>
+const micBtn = document.getElementById('micBtn');
+const statusEl = document.getElementById('status');
+const logEl = document.getElementById('log');
+const ringEl = document.getElementById('ring');
+const stageEl = document.getElementById('stage');
+const personaEl = document.getElementById('persona');
+
+let ws = null, micStream = null, captureCtx = null, workletNode = null, playCtx = null;
+let running = false, nextPlayTime = 0, playingSources = [];
+let pending = [], pendingLen = 0;
+let lastBubble = { role: null, el: null };
+
+// Load personas from server
+fetch('/api/personas').then(r => r.json()).then(list => {
+  personaEl.innerHTML = list.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
+});
+
+function setStatus(t) { statusEl.textContent = t; }
+
+function addTranscript(role, text) {
+  document.getElementById('empty')?.remove();
+  if (lastBubble.role !== role || !lastBubble.el) {
+    const el = document.createElement('div');
+    el.className = 'msg ' + role;
+    logEl.appendChild(el);
+    lastBubble = { role, el };
+  }
+  lastBubble.el.textContent += text;
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+// ---- Mic capture: worklet -> downsample to 16 kHz -> Int16 PCM -> WebSocket ----
+const workletCode = `
+class Recorder extends AudioWorkletProcessor {
+  process(inputs) {
+    const ch = inputs[0] && inputs[0][0];
+    if (ch) this.port.postMessage(ch.slice(0));
+    return true;
+  }
+}
+registerProcessor('recorder', Recorder);`;
+
+function downsample(input, inRate, outRate) {
+  if (inRate === outRate) return input;
+  const ratio = inRate / outRate;
+  const len = Math.floor(input.length / ratio);
+  const out = new Float32Array(len);
+  for (let i = 0; i < len; i++) {
+    const start = Math.floor(i * ratio), end = Math.min(Math.floor((i + 1) * ratio), input.length);
+    let sum = 0, c = 0;
+    for (let j = start; j < end; j++) { sum += input[j]; c++; }
+    out[i] = c ? sum / c : 0;
+  }
+  return out;
+}
+
+function floatToInt16(f32) {
+  const out = new Int16Array(f32.length);
+  for (let i = 0; i < f32.length; i++) {
+    const s = Math.max(-1, Math.min(1, f32[i]));
+    out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+  }
+  return out;
+}
+
+function handleMicChunk(chunk) {
+  // Visual level ring
+  let peak = 0;
+  for (let i = 0; i < chunk.length; i++) peak = Math.max(peak, Math.abs(chunk[i]));
+  ringEl.style.transform = `scale(${0.72 + Math.min(peak * 1.6, 0.28)})`;
+
+  pending.push(chunk); pendingLen += chunk.length;
+  const target = captureCtx.sampleRate * 0.1; // send every ~100 ms
+  if (pendingLen < target) return;
+  const merged = new Float32Array(pendingLen);
+  let off = 0;
+  for (const p of pending) { merged.set(p, off); off += p.length; }
+  pending = []; pendingLen = 0;
+  const pcm = floatToInt16(downsample(merged, captureCtx.sampleRate, 16000));
+  if (ws && ws.readyState === 1) ws.send(pcm.buffer);
+}
+
+async function startMic() {
+  micStream = await navigator.mediaDevices.getUserMedia({
+    audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+  });
+  captureCtx = new AudioContext();
+  const url = URL.createObjectURL(new Blob([workletCode], { type: 'application/javascript' }));
+  await captureCtx.audioWorklet.addModule(url);
+  const src = captureCtx.createMediaStreamSource(micStream);
+  workletNode = new AudioWorkletNode(captureCtx, 'recorder');
+  workletNode.port.onmessage = (e) => handleMicChunk(e.data);
+  src.connect(workletNode);
+}
+
+// ---- Playback: 24 kHz Int16 PCM from Gemini, scheduled back to back ----
+function playAudio(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const int16 = new Int16Array(bytes.buffer, 0, Math.floor(bytes.length / 2));
+  const f32 = new Float32Array(int16.length);
+  for (let i = 0; i < int16.length; i++) f32[i] = int16[i] / 32768;
+
+  const buf = playCtx.createBuffer(1, f32.length, 24000);
+  buf.copyToChannel(f32, 0);
+  const src = playCtx.createBufferSource();
+  src.buffer = buf;
+  src.connect(playCtx.destination);
+  nextPlayTime = Math.max(nextPlayTime, playCtx.currentTime + 0.02);
+  src.start(nextPlayTime);
+  nextPlayTime += buf.duration;
+  playingSources.push(src);
+  src.onended = () => { playingSources = playingSources.filter(s => s !== src); };
+  setStatus('Agent is speaking…');
+}
+
+function stopPlayback() {
+  for (const s of playingSources) { try { s.stop(); } catch (e) {} }
+  playingSources = [];
+  nextPlayTime = 0;
+}
+
+// ---- Session control ----
+async function start() {
+  running = true;
+  micBtn.disabled = true;
+  setStatus('Connecting…');
+  logEl.innerHTML = '';
+  lastBubble = { role: null, el: null };
+  playCtx = new AudioContext({ sampleRate: 24000 });
+
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/agent`);
+
+  ws.onopen = () => ws.send(JSON.stringify({ type: 'start', persona: personaEl.value }));
+
+  ws.onmessage = async (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'ready') {
+      try {
+        await startMic();
+        stageEl.classList.add('live');
+        micBtn.textContent = 'Stop';
+        micBtn.setAttribute('aria-label', 'Stop conversation');
+        micBtn.disabled = false;
+        setStatus('Listening… start speaking');
+      } catch (err) {
+        setStatus('Microphone blocked. Allow mic access in the browser and try again.');
+        stop();
+      }
+    } else if (msg.type === 'audio') {
+      playAudio(msg.data);
+    } else if (msg.type === 'transcript') {
+      addTranscript(msg.role, msg.text);
+    } else if (msg.type === 'interrupted') {
+      stopPlayback();
+      lastBubble = { role: null, el: null };
+      setStatus('Listening…');
+    } else if (msg.type === 'turn_complete') {
+      lastBubble = { role: null, el: null };
+      setTimeout(() => { if (running && !playingSources.length) setStatus('Listening…'); }, 300);
+    } else if (msg.type === 'error') {
+      setStatus('Error: ' + msg.message);
+    } else if (msg.type === 'closed') {
+      if (running) { setStatus('Session ended by server. ' + (msg.reason || '')); stop(true); }
+    }
+  };
+
+  ws.onclose = () => { if (running) stop(true); };
+  ws.onerror = () => setStatus('Could not reach the server.');
+}
+
+function stop(keepStatus) {
+  running = false;
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'stop' }));
+  try { ws && ws.close(); } catch (e) {}
+  stopPlayback();
+  micStream && micStream.getTracks().forEach(t => t.stop());
+  captureCtx && captureCtx.close();
+  playCtx && playCtx.close();
+  ws = micStream = captureCtx = playCtx = workletNode = null;
+  pending = []; pendingLen = 0;
+  stageEl.classList.remove('live');
+  ringEl.style.transform = 'scale(0.72)';
+  micBtn.textContent = 'Start';
+  micBtn.setAttribute('aria-label', 'Start conversation');
+  micBtn.disabled = false;
+  if (!keepStatus) setStatus('Conversation ended');
+}
+
+micBtn.addEventListener('click', () => (running ? stop() : start()));
+</script>
+</body>
+</html>

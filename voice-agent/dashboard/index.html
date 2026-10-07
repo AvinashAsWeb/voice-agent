@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Usage &amp; cost dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;800&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --paper: #EEF1EC; --ink: #1E2B2F; --muted: #5E6B6E; --teal: #0F7B6C;
+    --amber: #C77D0A; --live: #D9480F; --line: #D5DBD4; --white: #fff;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--paper); color: var(--ink); font-family: 'Manrope', system-ui, sans-serif; }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 32px 20px 60px; }
+  header { display: flex; justify-content: space-between; align-items: flex-end; flex-wrap: wrap; gap: 12px; margin-bottom: 24px; }
+  h1 { margin: 0; font-size: 28px; font-weight: 800; letter-spacing: -0.02em; }
+  .meta { color: var(--muted); font-size: 14px; }
+  .live-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--teal); margin-right: 6px; }
+
+  .spend { background: var(--ink); color: #fff; border-radius: 16px; padding: 24px; display: flex; flex-wrap: wrap; gap: 32px; align-items: flex-end; margin-bottom: 16px; }
+  .spend .big { font-size: 48px; font-weight: 800; letter-spacing: -0.03em; line-height: 1; }
+  .spend .lbl { font-size: 14px; color: #B9C6C4; margin-top: 6px; }
+  .spend .small { font-size: 22px; font-weight: 800; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .stat { background: var(--white); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+  .stat .v { font-size: 26px; font-weight: 800; }
+  .stat .l { font-size: 13px; color: var(--muted); margin-top: 2px; }
+  .stat.active .v { color: var(--live); }
+
+  .charts { display: grid; grid-template-columns: 2fr 1fr; gap: 12px; margin-bottom: 16px; }
+  @media (max-width: 800px) { .charts { grid-template-columns: 1fr; } }
+  .panel { background: var(--white); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+  .panel h2 { font-size: 16px; margin: 0 0 12px; }
+  .chart-box { position: relative; height: 240px; }
+
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 600; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .badge { padding: 3px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .badge.active { background: #F6D5C6; color: var(--live); }
+  .badge.completed { background: #DCE7E4; color: var(--teal); }
+  button.link { background: none; border: none; color: var(--teal); font: 600 14px 'Manrope', sans-serif; cursor: pointer; padding: 0; }
+  button.link:focus-visible { outline: 2px solid var(--ink); }
+  .empty { color: var(--muted); padding: 20px 0; text-align: center; }
+
+  dialog { border: none; border-radius: 14px; padding: 0; width: min(640px, 94vw); max-height: 80vh; }
+  dialog::backdrop { background: rgba(30, 43, 47, 0.5); }
+  .dlg-head { padding: 16px 20px; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; gap: 12px; }
+  .dlg-body { padding: 16px 20px; overflow-y: auto; max-height: 60vh; display: flex; flex-direction: column; gap: 8px; }
+  .turn { padding: 8px 12px; border-radius: 10px; line-height: 1.45; }
+  .turn.user { background: var(--ink); color: #fff; align-self: flex-end; max-width: 85%; }
+  .turn.agent { background: #DCE7E4; align-self: flex-start; max-width: 85%; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Voice agent usage</h1>
+      <div class="meta" id="modelInfo">Loading…</div>
+    </div>
+    <div class="meta"><span class="live-dot"></span><span id="updated">Updating every 5 seconds</span></div>
+  </header>
+
+  <section class="spend">
+    <div><div class="big" id="totalCost">$0.0000</div><div class="lbl">Total estimated spend</div></div>
+    <div><div class="small" id="todayCost">$0.0000</div><div class="lbl">Spent today</div></div>
+    <div><div class="small" id="avgCost">$0.0000</div><div class="lbl">Average per session</div></div>
+  </section>
+
+  <section class="grid">
+    <div class="stat active"><div class="v" id="active">0</div><div class="l">Active sessions</div></div>
+    <div class="stat"><div class="v" id="completed">0</div><div class="l">Completed sessions</div></div>
+    <div class="stat"><div class="v" id="avgDur">0s</div><div class="l">Average duration</div></div>
+    <div class="stat"><div class="v" id="tokens">0</div><div class="l">Total tokens</div></div>
+    <div class="stat"><div class="v" id="audioIn">0</div><div class="l">Audio input tokens</div></div>
+    <div class="stat"><div class="v" id="audioOut">0</div><div class="l">Audio output tokens</div></div>
+  </section>
+
+  <section class="charts">
+    <div class="panel"><h2>Daily spend and tokens (last 14 days)</h2><div class="chart-box"><canvas id="dailyChart"></canvas></div></div>
+    <div class="panel"><h2>Weekly sessions</h2><div class="chart-box"><canvas id="weeklyChart"></canvas></div></div>
+  </section>
+
+  <section class="panel">
+    <h2>Sessions</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>Started</th><th>Persona</th><th>Status</th><th class="num">Duration</th>
+          <th class="num">Audio in</th><th class="num">Audio out</th><th class="num">Text</th>
+          <th class="num">Total tokens</th><th class="num">Cost</th><th>Transcript</th>
+        </tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <div class="empty" id="noRows">No sessions yet. Open the voice agent page and start a conversation.</div>
+    </div>
+  </section>
+</div>
+
+<dialog id="dlg">
+  <div class="dlg-head"><strong id="dlgTitle">Transcript</strong><button class="link" id="dlgClose">Close</button></div>
+  <div class="dlg-body" id="dlgBody"></div>
+</dialog>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const money = (n) => '$' + (n || 0).toFixed(4);
+const num = (n) => (n || 0).toLocaleString();
+const dur = (s) => s >= 60 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${s}s`;
+const esc = (t) => String(t).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+Chart.defaults.font.family = 'Manrope, sans-serif';
+Chart.defaults.color = '#5E6B6E';
+
+const dailyChart = new Chart($('dailyChart'), {
+  data: {
+    labels: [],
+    datasets: [
+      { type: 'bar', label: 'Cost (USD)', data: [], backgroundColor: '#C77D0A', yAxisID: 'y' },
+      { type: 'line', label: 'Tokens', data: [], borderColor: '#0F7B6C', backgroundColor: '#0F7B6C', tension: 0.3, yAxisID: 'y1' }
+    ]
+  },
+  options: {
+    maintainAspectRatio: false, animation: false,
+    scales: {
+      y: { beginAtZero: true, position: 'left', title: { display: true, text: 'USD' } },
+      y1: { beginAtZero: true, position: 'right', grid: { drawOnChartArea: false }, title: { display: true, text: 'Tokens' } }
+    }
+  }
+});
+
+const weeklyChart = new Chart($('weeklyChart'), {
+  type: 'bar',
+  data: { labels: [], datasets: [{ label: 'Sessions', data: [], backgroundColor: '#1E2B2F' }] },
+  options: { maintainAspectRatio: false, animation: false, scales: { y: { beginAtZero: true, ticks: { precision: 0 } } } }
+});
+
+async function load() {
+  try {
+    const res = await fetch('/api/stats', { credentials: 'same-origin' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const d = await res.json();
+    const s = d.summary;
+    const total = s.active + s.completed;
+
+    $('modelInfo').textContent = `Model ${d.model} · audio in $${d.pricing.inputAudio}/1M · audio out $${d.pricing.outputAudio}/1M`;
+    $('totalCost').textContent = money(s.totalCost);
+    $('todayCost').textContent = money(d.daily[d.daily.length - 1]?.cost);
+    $('avgCost').textContent = money(total ? s.totalCost / total : 0);
+    $('active').textContent = s.active;
+    $('completed').textContent = s.completed;
+    $('avgDur').textContent = dur(s.avgDurationSec);
+    $('tokens').textContent = num(s.totalTokens);
+    $('audioIn').textContent = num(s.audioInTokens);
+    $('audioOut').textContent = num(s.audioOutTokens);
+
+    dailyChart.data.labels = d.daily.map(x => x.date.slice(5));
+    dailyChart.data.datasets[0].data = d.daily.map(x => +x.cost.toFixed(5));
+    dailyChart.data.datasets[1].data = d.daily.map(x => x.tokens);
+    dailyChart.update();
+
+    weeklyChart.data.labels = d.weekly.map(x => 'Wk ' + x.week.slice(5));
+    weeklyChart.data.datasets[0].data = d.weekly.map(x => x.sessions);
+    weeklyChart.update();
+
+    $('noRows').style.display = d.sessions.length ? 'none' : 'block';
+    $('rows').innerHTML = d.sessions.map(r => `
+      <tr>
+        <td>${new Date(r.startedAt).toLocaleString()}</td>
+        <td>${esc(r.persona)}</td>
+        <td><span class="badge ${r.status}">${r.status}</span></td>
+        <td class="num">${dur(r.durationSec)}</td>
+        <td class="num">${num(r.usage.inputAudio)}</td>
+        <td class="num">${num(r.usage.outputAudio)}</td>
+        <td class="num">${num(r.usage.inputText + r.usage.outputText)}</td>
+        <td class="num">${num(r.usage.total)}</td>
+        <td class="num">${money(r.cost)}</td>
+        <td><button class="link" data-id="${r.id}">View (${r.turns})</button></td>
+      </tr>`).join('');
+
+    $('updated').textContent = 'Updated ' + new Date().toLocaleTimeString();
+  } catch (e) {
+    $('updated').textContent = 'Could not load data (' + e.message + '). Retrying…';
+  }
+}
+
+$('rows').addEventListener('click', async (e) => {
+  const id = e.target.dataset.id;
+  if (!id) return;
+  const s = await (await fetch('/api/sessions/' + id)).json();
+  $('dlgTitle').textContent = 'Transcript · ' + new Date(s.startedAt).toLocaleString();
+  $('dlgBody').innerHTML = s.turns.length
+    ? s.turns.map(t => `<div class="turn ${t.role}">${esc(t.text)}</div>`).join('')
+    : '<div class="empty">No speech was recorded in this session.</div>';
+  $('dlg').showModal();
+});
+$('dlgClose').addEventListener('click', () => $('dlg').close());
+
+load();
+setInterval(load, 5000);
+</script>
+</body>
+</html>
